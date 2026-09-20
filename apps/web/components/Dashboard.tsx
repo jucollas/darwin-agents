@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChainFlow } from "./ChainFlow";
+import { CreativeGallery } from "./CreativeGallery";
 import { FundPanel } from "./FundPanel";
 import { LineageStrip } from "./LineageStrip";
 import { MoneyLedger } from "./MoneyLedger";
@@ -347,6 +348,15 @@ export function Dashboard() {
           />
         </div>
       </section>
+
+      <div style={{ marginTop: "3rem" }}>
+        <CreativeGallery
+          agents={campaign.agents}
+          productImage={campaign.productImage}
+          selectedId={hovered}
+          onSelect={setHovered}
+        />
+      </div>
 
       <details style={{ marginTop: "2rem" }}>
         <summary
