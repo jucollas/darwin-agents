@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { SOLO_USER } from "./auth";
@@ -41,6 +41,15 @@ type Session = {
 const WALLET_BLOCK = 256;
 
 /**
+ * How many blocks fit under BIP-32's non-hardened index limit.
+ *
+ * `agentAccount()` derives at `block * WALLET_BLOCK + n`, and viem refuses an
+ * `addressIndex` at or above 2^31, so a block drawn at random has to stay below this or the
+ * agents in it cannot be derived at all.
+ */
+const BLOCK_CEILING = Math.floor(2 ** 31 / WALLET_BLOCK);
+
+/**
  * Where the snapshot and cursor live.
  *
  * On Vercel `process.cwd()` is the read-only bundle, so a write there throws and the session
@@ -79,10 +88,27 @@ function claimWalletBlock(): number {
     writeFileSync(WALLET_CURSOR, JSON.stringify({ nextBlock: next + 1 }), "utf8");
     return next * WALLET_BLOCK;
   } catch {
-    // Read-only filesystem. Spread distinct process instances apart by start time, then step
-    // strictly forward within this one so repeated campaigns cannot land on the same block.
-    const processOffset = Math.floor(Date.now() / 1000) % 4096;
-    return (processOffset + blocksClaimedThisProcess++) * WALLET_BLOCK;
+    // Read-only filesystem — the usual case on Vercel, where /tmp is wiped between
+    // instances so the cursor is rarely there to read.
+    //
+    // A start-time offset is not enough here. Seconds since the epoch modulo any window
+    // wraps, and two campaigns that land on the same value derive the same addresses; the
+    // second one then reverts with AgentExists() the moment it tries to register, because
+    // those agents are already on chain from the earlier run. Wall-clock time also repeats
+    // across instances that boot together behind a load balancer.
+    //
+    // So draw the block at random instead. Collision stops depending on when a campaign
+    // started and becomes a birthday problem over the whole space: a few thousand campaigns
+    // still sit far below a percent. The in-process counter stays on top of it so repeated
+    // campaigns inside one instance step strictly forward, which random draws alone would
+    // not guarantee.
+    //
+    // The ceiling is BIP-32's, not ours: a non-hardened `addressIndex` has to stay under
+    // 2^31, and every index in this block is `block * WALLET_BLOCK + n`. Drawing from
+    // BLOCK_CEILING keeps the largest index derivable — go past it and viem throws instead
+    // of handing back a wallet.
+    const processOffset = randomInt(0, BLOCK_CEILING);
+    return ((processOffset + blocksClaimedThisProcess++) % BLOCK_CEILING) * WALLET_BLOCK;
   }
 }
 
