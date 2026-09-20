@@ -249,7 +249,37 @@ export class ChainBridge {
       account: this.operator,
     });
     await this.publicClient.waitForTransactionReceipt({ hash });
+    // The receipt says the block is mined, not that the node answering the *next* read has
+    // caught up with it. Behind a load balancer the following spend() estimated gas against
+    // a lagging node and reverted with AgentUnknown, so the agent is polled until it is
+    // actually readable before we let it spend.
+    await this.waitForAgent(account.address);
     return { address: account.address, hash };
+  }
+
+  /**
+   * Poll until the treasury reports this agent as existing, or give up quietly.
+   *
+   * Giving up is safe: the caller's next transaction either succeeds or reverts with the
+   * same error it would have anyway, so this can only make things better.
+   */
+  async waitForAgent(address: Address, attempts = 8): Promise<boolean> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const agent = (await this.publicClient.readContract({
+          address: this.cfg.treasury,
+          abi: agentTreasuryAbi,
+          functionName: "agents",
+          args: [address],
+        })) as unknown as readonly unknown[];
+        // `exists` is the last field of the Agent struct.
+        if (agent[agent.length - 1] === true) return true;
+      } catch {
+        // A read that throws is the same as a read that says "not yet".
+      }
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+    }
+    return false;
   }
 
   async reproduce(args: {
@@ -277,6 +307,9 @@ export class ChainBridge {
       account: this.operator,
     });
     await this.publicClient.waitForTransactionReceipt({ hash });
+    // A child born mid-run spends on the same day it is born, so it needs the same
+    // guarantee its parent got: readable on chain before anyone asks it to pay.
+    await this.waitForAgent(child.address);
     return { address: child.address, hash };
   }
 

@@ -4,7 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChainFlow } from "./ChainFlow";
 import { LineageStrip } from "./LineageStrip";
+import { MoneyLedger } from "./MoneyLedger";
 import { PopulationTable } from "./PopulationTable";
+import {
+  type LedgerEntry,
+  readNdjson,
+  toLedgerEntry,
+} from "@/lib/ledger";
 import { type CampaignView, money, percent } from "@/lib/view";
 
 type ChainStatus =
@@ -28,9 +34,15 @@ export function Dashboard() {
    * While the speaker is talking, days pass, agents die and children are born on screen.
    */
   const [running, setRunning] = useState(false);
+  /** Every money movement of this session, newest first. */
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
+  const [settling, setSettling] = useState(false);
+  const [chainName, setChainName] = useState<string | null>(null);
   const router = useRouter();
-  // Guards against a slow tick overlapping the next interval and queueing requests up.
+  // Guards against a slow day overlapping the next one and queueing requests up. A day
+  // that settles on chain can take half a minute, so this matters more than it used to.
   const ticking = useRef(false);
+  const seq = useRef(0);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/campaign", { cache: "no-store" });
@@ -43,22 +55,55 @@ export function Dashboard() {
     refresh();
   }, [refresh]);
 
+  /**
+   * Run one day and stream its money as it settles.
+   *
+   * Every payment is a real transaction when the chain is configured, so a day takes as
+   * long as the network takes. Rather than block until it is over, each movement is pushed
+   * onto the ledger the moment the node confirms it.
+   */
+  const runDay = useCallback(async () => {
+    if (ticking.current) return;
+    ticking.current = true;
+    try {
+      const res = await fetch("/api/tick?ticks=1", { method: "POST" });
+      if (!res.body) return;
+
+      await readNdjson(res.body, (message) => {
+        if (message.type === "start") {
+          setSettling(Boolean(message.settling));
+          setChainName((message.chain as string | null) ?? null);
+        }
+        const row = toLedgerEntry(message, seq.current++);
+        if (row) setLedger((prev) => [row, ...prev].slice(0, 200));
+        if (message.type === "error") setError(String(message.message));
+      });
+
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      ticking.current = false;
+    }
+  }, [refresh]);
+
+  // Autoplay: start the next day only once the previous one has fully settled, so the
+  // clock follows the chain rather than racing ahead of it.
   useEffect(() => {
     if (!running) return;
-    const id = setInterval(async () => {
-      if (ticking.current) return;
-      ticking.current = true;
-      try {
-        await fetch("/api/tick?ticks=1", { method: "POST" });
-        await refresh();
-      } catch {
-        // A failed tick should not stop the clock mid-pitch; the next one will try again.
-      } finally {
-        ticking.current = false;
+    let stop = false;
+    (async () => {
+      while (!stop) {
+        await runDay();
+        if (stop) break;
+        // A breath between days so the ledger is readable rather than a blur.
+        await new Promise((r) => setTimeout(r, 600));
       }
-    }, 1600);
-    return () => clearInterval(id);
-  }, [running, refresh]);
+    })();
+    return () => {
+      stop = true;
+    };
+  }, [running, runDay]);
 
   // A paused campaign delivers nothing, so keep the button honest and stop the clock.
   useEffect(() => {
@@ -183,7 +228,7 @@ export function Dashboard() {
 
       {/* Everything below explains where that agent came from. */}
       <section className="band" style={{ marginTop: "3rem", paddingTop: "1.75rem" }}>
-        <h2 style={{ fontSize: "1.4rem" }}>Where that agent came from</h2>
+        <h2 style={{ fontSize: "1.4rem" }}>The money, day by day</h2>
         <p
           style={{
             color: "var(--ink-soft)",
@@ -191,9 +236,11 @@ export function Dashboard() {
             maxWidth: "62ch",
           }}
         >
-          Nobody chose its strategy. {campaign.total} agents have been created,{" "}
-          {campaign.dead} were shut down for spending more than they earned, and
-          the survivors bred into the gap they left.
+          Every payment below is signed by the agent that made it and settled on
+          chain before the next one starts. Nobody chose these strategies:{" "}
+          {campaign.total} agents have been created, {campaign.dead} were shut
+          down for spending more than they earned, and the survivors inherited
+          what was left.
         </p>
 
         <div
@@ -222,11 +269,9 @@ export function Dashboard() {
             type="button"
             className="press"
             disabled={busy !== null || campaign.paused || running}
-            onClick={() =>
-              act("tick", () => fetch("/api/tick?ticks=1", { method: "POST" }))
-            }
+            onClick={runDay}
           >
-            {busy === "tick" ? "Trading…" : "One day"}
+            One day
           </button>
           <button
             type="button"
@@ -274,12 +319,21 @@ export function Dashboard() {
           </p>
         )}
 
-        <LineageStrip
-          agents={campaign.agents}
-          generation={campaign.generation}
-          selectedId={hovered}
-          onSelect={setHovered}
+        <MoneyLedger
+          entries={ledger}
+          running={running || ticking.current}
+          settling={settling}
+          chainName={chainName}
         />
+
+        <div style={{ marginTop: "2rem" }}>
+          <LineageStrip
+            agents={campaign.agents}
+            generation={campaign.generation}
+            selectedId={hovered}
+            onSelect={setHovered}
+          />
+        </div>
       </section>
 
       <details style={{ marginTop: "2rem" }}>

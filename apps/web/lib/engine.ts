@@ -185,6 +185,14 @@ export async function tick(
       conversionId: string,
     ) => Promise<string | null>;
     /**
+     * The generation boundary, on chain: `reproduce()` gives the child its own wallet and
+     * the slice of allowance its parent gave up, and `kill()` closes a shut-down agent's.
+     * Together with onSpend/onRevenue this makes the whole lineage reconstructible from
+     * events alone, which is the claim the contract exists to support.
+     */
+    onBirth?: (child: Agent, parent: Agent) => Promise<string | null>;
+    onDeath?: (agent: Agent) => Promise<string | null>;
+    /**
      * The advertising network. When present, agents run real campaigns through it instead
      * of buying traffic straight from the market — same economics, but the lifecycle
      * (create, deliver, attribute, pause) goes through the interface an adapter implements.
@@ -338,6 +346,17 @@ export async function tick(
 
     for (const { agent, reason, fitness } of outcome.killed) {
       report.deaths.push({ agentId: agent.id, reason });
+      // Closing the agent on chain is what stops its wallet spending again, so it is
+      // recorded as a transaction rather than only as a line in the log.
+      const killTx = hooks.onDeath ? await hooks.onDeath(agent) : null;
+      if (killTx)
+        agent.txs.push({
+          kind: "kill",
+          hash: killTx,
+          amountMicro: 0,
+          memo: reason,
+          tick: report.tick,
+        });
       log(
         campaign,
         "death",
@@ -351,6 +370,19 @@ export async function tick(
     for (const child of outcome.born) {
       report.births.push(child.id);
       const parent = campaign.agents.find((a) => a.id === child.parentId);
+      // The inheritance is the money moving: the parent already gave up this allowance in
+      // breed(), and reproduce() is where the chain learns the child may now spend it.
+      if (parent && hooks.onBirth) {
+        const birthTx = await hooks.onBirth(child, parent);
+        if (birthTx)
+          child.txs.push({
+            kind: "reproduce",
+            hash: birthTx,
+            amountMicro: child.allowanceMicro,
+            memo: `from ${parent.label}`,
+            tick: report.tick,
+          });
+      }
       log(
         campaign,
         "birth",

@@ -60,7 +60,8 @@ describe("wallet derivation across campaigns", () => {
     // Distinct blocks, so no two campaigns can collide on chain.
     const all = [...first, ...second, ...third];
     expect(new Set(all).size).toBe(all.length);
-  });
+    // Three campaigns of BIP-32 derivation; same reason as the isolation test's budget.
+  }, 20_000);
 
   it("keeps indices unique within a single campaign", async () => {
     const indices = await walletIndicesFor(44);

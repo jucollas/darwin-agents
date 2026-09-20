@@ -78,7 +78,10 @@ describe("a new campaign starts clean", () => {
     // The first campaign's own object is untouched — isolation, not mutation.
     expect(first.campaign.tick).toBe(6);
     expect(first.campaign.product.name).toBe("Electric Bicycle");
-  });
+    // Two campaigns' worth of BIP-32 derivation, which is deliberately slow work. It fits
+    // in the default 5s alone and does not when the suite runs it beside the other file
+    // deriving wallets, so the budget is stated rather than left to scheduling luck.
+  }, 20_000);
 
   it("gives the second campaign its own ad platform, so campaign ids cannot collide", async () => {
     const { startCampaign, endCampaign } = await import("./store");
