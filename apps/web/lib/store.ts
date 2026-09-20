@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { SOLO_USER } from "./auth";
 import { type AdPlatform, createAdPlatform } from "./ads";
 import { ChainBridge, type ChainConfig, configFromEnv } from "./chain";
 import { type CampaignInput, createCampaign } from "./engine";
@@ -84,26 +86,52 @@ function claimWalletBlock(): number {
   }
 }
 
-const SNAPSHOT = resolve(DATA_DIR, "campaign.json");
+/**
+ * Where one user's campaign is snapshotted.
+ *
+ * A Privy DID looks like `did:privy:clx…`, which is not a filename, so it is reduced to a
+ * hash. Two users can never collide on a path, and the id itself does not end up on disk.
+ */
+function snapshotFor(userId: string): string {
+  const safe =
+    userId === SOLO_USER
+      ? "campaign"
+      : `campaign-${createHash("sha256").update(userId).digest("hex").slice(0, 16)}`;
+  return resolve(DATA_DIR, `${safe}.json`);
+}
 
 declare global {
-  var __darwinSession: Session | null | undefined;
+  var __darwinSessions: Map<string, Session | null> | undefined;
 }
 
-export function getSession(): Session | null {
-  if (globalThis.__darwinSession === undefined) {
-    globalThis.__darwinSession = restore();
-  }
-  return globalThis.__darwinSession ?? null;
+/**
+ * One campaign per user, keyed by Privy DID.
+ *
+ * The map lives on globalThis so Next's dev-server module reloading does not drop everyone's
+ * campaign, and each user's snapshot is a separate file, so one person pressing
+ * "+ New campaign" cannot wipe another's population.
+ */
+function sessions(): Map<string, Session | null> {
+  if (!globalThis.__darwinSessions) globalThis.__darwinSessions = new Map();
+  return globalThis.__darwinSessions;
 }
 
-export function requireSession(): Session {
-  const s = getSession();
+export function getSession(userId: string): Session | null {
+  const all = sessions();
+  if (!all.has(userId)) all.set(userId, restore(userId));
+  return all.get(userId) ?? null;
+}
+
+export function requireSession(userId: string): Session {
+  const s = getSession(userId);
   if (!s) throw new Error("No campaign yet. Create one at / first.");
   return s;
 }
 
-export async function startCampaign(input: CampaignInput): Promise<Session> {
+export async function startCampaign(
+  userId: string,
+  input: CampaignInput,
+): Promise<Session> {
   // Agent numbering restarts with each campaign, so the labels a judge reads on the
   // dashboard are A01…A12 and not whatever the previous run happened to leave behind.
   resetAgentCounter();
@@ -124,18 +152,44 @@ export async function startCampaign(input: CampaignInput): Promise<Session> {
     session.walletIndex.set(agent.id, session.nextWalletIndex++);
   }
 
-  globalThis.__darwinSession = session;
-  persist();
+  sessions().set(userId, session);
+  persist(userId);
   return session;
 }
 
-export function endCampaign(): void {
-  globalThis.__darwinSession = null;
+export function endCampaign(userId: string): void {
+  sessions().set(userId, null);
   try {
-    writeFileSync(SNAPSHOT, "null", "utf8");
+    writeFileSync(snapshotFor(userId), "null", "utf8");
   } catch {
     // A read-only filesystem (Vercel) just means no snapshot; the session still works.
   }
+}
+
+/**
+ * Find whoever owns the agent behind a tracking link.
+ *
+ * The storefront is public — a visitor who clicked an ad has no account and cannot say
+ * which campaign they came from — so the id itself has to locate the session. Tracking ids
+ * are random per agent, so this is a lookup, not a guess.
+ *
+ * Only sessions already loaded in this process are searched; a campaign whose snapshot has
+ * not been touched since boot is not found. In practice the campaign serving live ads is
+ * the one running, and the page already handles "this link has expired".
+ */
+export function sessionByTracking(
+  tracking: string,
+): { userId: string; session: Session } | null {
+  // Single-user mode keeps everything under one id whose snapshot may not have been read
+  // yet on a cold start, so load it before looking.
+  getSession(SOLO_USER);
+
+  for (const [userId, session] of sessions()) {
+    if (!session) continue;
+    if (session.campaign.agents.some((a) => a.trackingId === tracking))
+      return { userId, session };
+  }
+  return null;
 }
 
 /** Assign a wallet slot to an agent born after the campaign started. */
@@ -152,13 +206,13 @@ export function chainConfig(): ChainConfig | null {
   return configFromEnv();
 }
 
-export function persist(): void {
-  const session = globalThis.__darwinSession;
+export function persist(userId: string): void {
+  const session = sessions().get(userId);
   if (!session) return;
   try {
-    mkdirSync(dirname(SNAPSHOT), { recursive: true });
+    mkdirSync(dirname(snapshotFor(userId)), { recursive: true });
     writeFileSync(
-      SNAPSHOT,
+      snapshotFor(userId),
       JSON.stringify(
         {
           campaign: session.campaign,
@@ -175,9 +229,9 @@ export function persist(): void {
   }
 }
 
-function restore(): Session | null {
+function restore(userId: string): Session | null {
   try {
-    const raw = readFileSync(SNAPSHOT, "utf8");
+    const raw = readFileSync(snapshotFor(userId), "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed?.campaign) return null;
 

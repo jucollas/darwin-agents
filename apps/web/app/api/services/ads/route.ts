@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { UNAUTHORIZED, userFrom } from "@/lib/auth";
 import type { Address } from "viem";
 import { chainConfig, requireSession } from "@/lib/store";
 import {
@@ -33,9 +34,12 @@ export async function POST(request: Request) {
     );
   }
 
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
   let session: ReturnType<typeof requireSession>;
   try {
-    session = requireSession();
+    session = requireSession(userId);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 409 });
   }

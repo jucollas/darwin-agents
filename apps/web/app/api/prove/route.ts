@@ -1,5 +1,6 @@
 import type { Address } from "viem";
 import { NextResponse } from "next/server";
+import { UNAUTHORIZED, userFrom } from "@/lib/auth";
 import { explorerAddress, explorerTx, genomeHash } from "@/lib/chain";
 import { log } from "@/lib/engine";
 import { remainingAllowance } from "@/lib/evolution";
@@ -56,9 +57,12 @@ export async function POST(request: Request) {
     );
   }
 
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
   let session: ReturnType<typeof requireSession>;
   try {
-    session = requireSession();
+    session = requireSession(userId);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 409 });
   }
@@ -218,7 +222,7 @@ export async function POST(request: Request) {
             actor: "contract",
             ok: true,
           });
-          persist();
+          persist(userId);
           send({ type: "done", agentId: agent.id, address: agent.address });
           return;
         }
@@ -333,7 +337,7 @@ export async function POST(request: Request) {
           agent.id,
           `${agent.label} completed an on-chain x402 settlement`,
         );
-        persist();
+        persist(userId);
         send({ type: "done", agentId: agent.id, address: agent.address });
       } catch (e) {
         step({
@@ -344,7 +348,7 @@ export async function POST(request: Request) {
           actor: "contract",
           ok: false,
         });
-        persist();
+        persist(userId);
       } finally {
         // The only close in the function: the success path, the early returns and the
         // catch all fall through to here. Closing twice throws, and so does closing a

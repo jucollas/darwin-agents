@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { UNAUTHORIZED, userFrom } from "@/lib/auth";
 import { activeScenario, resolveSeed } from "@/lib/ads/scenario";
 import { generateCreatives, missingConfigHint } from "@/lib/creative";
 import {
@@ -16,8 +17,11 @@ export const dynamic = "force-dynamic";
 // created but still holding template copy.
 export const maxDuration = 60;
 
-export async function GET() {
-  const session = getSession();
+export async function GET(request: Request) {
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
+  const session = getSession(userId);
   if (!session)
     return NextResponse.json({
       campaign: null,
@@ -51,6 +55,9 @@ function chainStatus() {
 }
 
 export async function POST(request: Request) {
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
   const body = await request.json().catch(() => ({}) as Record<string, unknown>);
 
   const budgetUsd = Number(body.budgetUsd);
@@ -99,7 +106,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const session = await startCampaign({
+  const session = await startCampaign(userId, {
     product: {
       name: String(body.product.name),
       priceUsd: Number(body.product.priceUsd ?? 49),
@@ -174,7 +181,7 @@ export async function POST(request: Request) {
       if (written.source === "llm") copySource = "llm";
     }
     if (copySource === "template") copyNote = missingConfigHint();
-    persist();
+    persist(userId);
   } catch (e) {
     // The templates written at creation stay exactly where they are.
     copyNote = (e as Error).message.split("\n")[0];
@@ -189,7 +196,10 @@ export async function POST(request: Request) {
   });
 }
 
-export async function DELETE() {
-  endCampaign();
+export async function DELETE(request: Request) {
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
+  endCampaign(userId);
   return NextResponse.json({ ok: true });
 }

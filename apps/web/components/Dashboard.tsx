@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChainFlow } from "./ChainFlow";
+import { FundPanel } from "./FundPanel";
 import { LineageStrip } from "./LineageStrip";
 import { MoneyLedger } from "./MoneyLedger";
 import { PopulationTable } from "./PopulationTable";
@@ -11,6 +12,7 @@ import {
   readNdjson,
   toLedgerEntry,
 } from "@/lib/ledger";
+import { useApi } from "@/lib/useApi";
 import { type CampaignView, money, percent } from "@/lib/view";
 
 type ChainStatus =
@@ -39,17 +41,18 @@ export function Dashboard() {
   const [settling, setSettling] = useState(false);
   const [chainName, setChainName] = useState<string | null>(null);
   const router = useRouter();
+  const api = useApi();
   // Guards against a slow day overlapping the next one and queueing requests up. A day
   // that settles on chain can take half a minute, so this matters more than it used to.
   const ticking = useRef(false);
   const seq = useRef(0);
 
   const refresh = useCallback(async () => {
-    const res = await fetch("/api/campaign", { cache: "no-store" });
+    const res = await api("/api/campaign", { cache: "no-store" });
     const data = await res.json();
     setCampaign(data.campaign);
     setChain(data.chain);
-  }, []);
+  }, [api]);
 
   useEffect(() => {
     refresh();
@@ -66,7 +69,7 @@ export function Dashboard() {
     if (ticking.current) return;
     ticking.current = true;
     try {
-      const res = await fetch("/api/tick?ticks=1", { method: "POST" });
+      const res = await api("/api/tick?ticks=1", { method: "POST" });
       if (!res.body) return;
 
       await readNdjson(res.body, (message) => {
@@ -85,7 +88,7 @@ export function Dashboard() {
     } finally {
       ticking.current = false;
     }
-  }, [refresh]);
+  }, [refresh, api]);
 
   // Autoplay: start the next day only once the previous one has fully settled, so the
   // clock follows the chain rather than racing ahead of it.
@@ -226,6 +229,15 @@ export function Dashboard() {
         <ChainFlow chain={chain} campaign={campaign} onDone={refresh} />
       </section>
 
+      {chain.configured && (
+        <FundPanel
+          campaignId={campaign.chain.campaignId}
+          treasury={chain.treasury}
+          token={campaign.chain.token ?? ""}
+          onFunded={refresh}
+        />
+      )}
+
       {/* Everything below explains where that agent came from. */}
       <section className="band" style={{ marginTop: "3rem", paddingTop: "1.75rem" }}>
         <h2 style={{ fontSize: "1.4rem" }}>The money, day by day</h2>
@@ -279,7 +291,7 @@ export function Dashboard() {
             disabled={busy !== null}
             onClick={() =>
               act("pause", () =>
-                fetch("/api/control", {
+                api("/api/control", {
                   method: "POST",
                   headers: { "content-type": "application/json" },
                   body: JSON.stringify({
@@ -301,7 +313,7 @@ export function Dashboard() {
             onClick={() => {
               setRunning(false);
               act("new", async () => {
-                const res = await fetch("/api/campaign", { method: "DELETE" });
+                const res = await api("/api/campaign", { method: "DELETE" });
                 router.push("/");
                 router.refresh();
                 return res;
@@ -356,7 +368,7 @@ export function Dashboard() {
           explorer={chain.configured ? chain.explorer : null}
           onKill={(agentId) =>
             act("kill", () =>
-              fetch("/api/control", {
+              api("/api/control", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ action: "kill", agentId }),

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { UNAUTHORIZED, userFrom } from "@/lib/auth";
 import { log } from "@/lib/engine";
 import { populationStats, profitOf } from "@/lib/evolution";
 import { persist, requireSession } from "@/lib/store";
@@ -12,9 +13,12 @@ export const dynamic = "force-dynamic";
  * dashboard is not the only thing standing between an agent and the money.
  */
 export async function POST(request: Request) {
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
   let session: ReturnType<typeof requireSession>;
   try {
-    session = requireSession();
+    session = requireSession(userId);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 409 });
   }
@@ -121,7 +125,7 @@ export async function POST(request: Request) {
       );
   }
 
-  persist();
+  persist(userId);
   return NextResponse.json({
     ok: true,
     paused: campaign.paused,

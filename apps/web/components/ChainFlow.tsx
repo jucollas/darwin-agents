@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { useApi } from "@/lib/useApi";
 import type { AgentView, CampaignView } from "@/lib/view";
 
 /**
@@ -65,6 +66,7 @@ export function ChainFlow({
   const [failed, setFailed] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
+  const api = useApi();
 
   const living = campaign.agents.filter((a) => a.status === "alive");
   const candidate =
@@ -84,7 +86,7 @@ export function ChainFlow({
     abort.current = controller;
 
     try {
-      const res = await fetch("/api/prove", {
+      const res = await api("/api/prove", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ agentId: candidate.id }),
@@ -143,7 +145,7 @@ export function ChainFlow({
       setRunning(false);
       abort.current = null;
     }
-  }, [candidate, onDone]);
+  }, [candidate, onDone, api]);
 
   if (!chain.configured) {
     return (

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Archivo, Fraunces } from "next/font/google";
 import "./globals.css";
+import { Providers } from "@/components/Providers";
+import { AccountBar } from "@/components/AccountBar";
 
 const fraunces = Fraunces({
   subsets: ["latin"],
@@ -29,7 +31,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${fraunces.variable} ${archivo.variable}`}>
-        {children}
+        <Providers>
+          <AccountBar />
+          {children}
+        </Providers>
       </body>
     </html>
   );

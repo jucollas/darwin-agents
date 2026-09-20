@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { log } from "@/lib/engine";
-import { persist, requireSession, walletIndexFor } from "@/lib/store";
+import { persist, sessionByTracking, walletIndexFor } from "@/lib/store";
 import { type Micro, toUsd } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -14,14 +14,18 @@ export const maxDuration = 60;
  * not a number the backend decided to write down.
  */
 export async function POST(request: Request) {
-  let session: ReturnType<typeof requireSession>;
-  try {
-    session = requireSession();
-  } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 409 });
-  }
-
   const body = await request.json().catch(() => ({}));
+
+  // No login here on purpose: the buyer is a stranger who clicked an ad. The tracking id
+  // is what identifies the agent, and through it the campaign the sale belongs to.
+  const owner = sessionByTracking(String(body.tracking));
+  if (!owner)
+    return NextResponse.json(
+      { error: "That tracking link is not ours." },
+      { status: 404 },
+    );
+
+  const { userId, session } = owner;
   const { campaign } = session;
   const agent = campaign.agents.find(
     (a) => a.trackingId === String(body.tracking),
@@ -83,7 +87,7 @@ export async function POST(request: Request) {
     `${agent.label} made a sale on the storefront for $${toUsd(revenueMicro).toFixed(2)}`,
     revenueMicro,
   );
-  persist();
+  persist(userId);
 
   return NextResponse.json({
     ok: true,

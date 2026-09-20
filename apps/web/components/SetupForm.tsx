@@ -1,7 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useApi } from "@/lib/useApi";
 
 const EXAMPLES = [
   {
@@ -26,6 +27,7 @@ const EXAMPLES = [
 
 export function SetupForm() {
   const router = useRouter();
+  const api = useApi();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [product, setProduct] = useState(EXAMPLES[0]);
@@ -46,6 +48,29 @@ export function SetupForm() {
   const [perAgent, setPerAgent] = useState(25);
   const [epochCap, setEpochCap] = useState(6);
   const overAllocated = population * perAgent > budget;
+
+  /**
+   * Send someone who already has a campaign straight to it.
+   *
+   * This used to be a redirect on the server, which cannot work now that the campaign
+   * belongs to a user: the token that says who they are lives in the browser.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api("/api/campaign");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data.campaign) router.push("/dashboard");
+      } catch {
+        // Offline or not signed in — leave them on the form.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, router]);
 
   /** Read the file into a data: URL. 4 MB keeps the request well under the API's limit. */
   function onPhoto(event: React.ChangeEvent<HTMLInputElement>) {
@@ -72,7 +97,7 @@ export function SetupForm() {
     const populationSize = Number(form.get("populationSize"));
     const budgetUsd = Number(form.get("budgetUsd"));
 
-    const res = await fetch("/api/campaign", {
+    const res = await api("/api/campaign", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

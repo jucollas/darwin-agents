@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SOLO_USER } from "./auth";
 
 /**
  * AgentTreasury keys agents by address globally, not per campaign. A second campaign that
@@ -34,7 +35,7 @@ afterAll(() => {
 
 async function walletIndicesFor(seed: number): Promise<number[]> {
   const { startCampaign } = await import("./store");
-  const session = await startCampaign({
+  const session = await startCampaign(SOLO_USER, {
     product: PRODUCT,
     budgetUsd: 60_000,
     perAgentUsd: 2_100,

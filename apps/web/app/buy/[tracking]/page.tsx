@@ -1,5 +1,5 @@
 import { BuyPanel } from "@/components/BuyPanel";
-import { getSession } from "@/lib/store";
+import { sessionByTracking } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +14,8 @@ export default async function BuyPage({
   params: Promise<{ tracking: string }>;
 }) {
   const { tracking } = await params;
-  const session = getSession();
+  // Public page: the tracking id, not a login, says whose campaign this ad belongs to.
+  const session = sessionByTracking(tracking)?.session ?? null;
   const agent =
     session?.campaign.agents.find((a) => a.trackingId === tracking) ?? null;
   const product = session?.campaign.product ?? null;

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SOLO_USER } from "./auth";
 
 /**
  * The speaker presses "+ New campaign" in front of an audience. If anything from the
@@ -41,7 +42,7 @@ describe("a new campaign starts clean", () => {
     const { tick } = await import("./engine");
 
     // First campaign: run it far enough to accumulate history worth leaking.
-    const first = await startCampaign(input("Electric Bicycle", 999));
+    const first = await startCampaign(SOLO_USER, input("Electric Bicycle", 999));
     for (let i = 0; i < 6; i++)
       await tick(first.campaign, first.market, first.rng, {
         adPlatform: first.adPlatform,
@@ -53,10 +54,10 @@ describe("a new campaign starts clean", () => {
     expect(first.campaign.tick).toBe(6);
 
     // What the "+ New campaign" button does.
-    endCampaign();
-    expect(getSession()).toBeNull();
+    endCampaign(SOLO_USER);
+    expect(getSession(SOLO_USER)).toBeNull();
 
-    const second = await startCampaign(input("Espresso Machine", 7));
+    const second = await startCampaign(SOLO_USER, input("Espresso Machine", 7));
 
     // Nothing carried over.
     expect(second.campaign.id).not.toBe(first.campaign.id);
@@ -86,7 +87,7 @@ describe("a new campaign starts clean", () => {
   it("gives the second campaign its own ad platform, so campaign ids cannot collide", async () => {
     const { startCampaign, endCampaign } = await import("./store");
 
-    const a = await startCampaign(input("Bike", 999));
+    const a = await startCampaign(SOLO_USER, input("Bike", 999));
     const created = await a.adPlatform.createCampaign({
       agentId: a.campaign.agents[0].id,
       genome: a.campaign.agents[0].genome,
@@ -96,8 +97,8 @@ describe("a new campaign starts clean", () => {
       tick: 0,
     });
 
-    endCampaign();
-    const b = await startCampaign(input("Machine", 999));
+    endCampaign(SOLO_USER);
+    const b = await startCampaign(SOLO_USER, input("Machine", 999));
     // The new platform has never heard of the old campaign.
     expect(await b.adPlatform.getCampaign(created.campaignId)).toBeNull();
   });

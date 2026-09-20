@@ -1,5 +1,6 @@
 import type { Address } from "viem";
 import { NextResponse } from "next/server";
+import { UNAUTHORIZED, userFrom } from "@/lib/auth";
 import { createAdPlatform } from "@/lib/ads";
 import { explorerTx } from "@/lib/chain";
 import { tick } from "@/lib/engine";
@@ -35,9 +36,12 @@ export async function POST(request: Request) {
   // "just move the simulation along" path fast.
   const onChain = searchParams.get("chain") !== "off";
 
+  const userId = await userFrom(request);
+  if (!userId) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
   let session: ReturnType<typeof requireSession>;
   try {
-    session = requireSession();
+    session = requireSession(userId);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 409 });
   }
@@ -292,14 +296,14 @@ export async function POST(request: Request) {
         for (const agent of session.campaign.agents)
           walletIndexFor(session, agent.id);
 
-        persist();
+        persist(userId);
         send({
           type: "done",
           tick: session.campaign.tick,
           generation: session.campaign.generation,
         });
       } catch (e) {
-        persist();
+        persist(userId);
         send({ type: "error", message: (e as Error).message.split("\n")[0] });
       } finally {
         try {
