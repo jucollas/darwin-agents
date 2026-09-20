@@ -82,6 +82,22 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+  // Generation 0 must not consume the whole pot: children inherit from what is left, so a
+  // population that allocates everything up front can never reproduce.
+  if (perAgentUsd * populationSize > budgetUsd) {
+    return NextResponse.json(
+      {
+        error: `${populationSize} agents at $${perAgentUsd.toFixed(0)} each needs $${(perAgentUsd * populationSize).toFixed(0)}, more than the $${budgetUsd.toFixed(0)} budget.`,
+      },
+      { status: 400 },
+    );
+  }
+  if (!Number.isFinite(epochCapUsd) || epochCapUsd <= 0) {
+    return NextResponse.json(
+      { error: "Set a daily ceiling above zero." },
+      { status: 400 },
+    );
+  }
 
   const session = await startCampaign({
     product: {

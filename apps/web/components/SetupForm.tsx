@@ -33,6 +33,20 @@ export function SetupForm() {
   const [photo, setPhoto] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState<string | null>(null);
 
+  /**
+   * The four numbers that decide what the contract will allow, kept in state so the form
+   * can say what they mean together before anyone commits money to them.
+   *
+   * The per-agent and per-day ceilings used to be derived behind the form — budget × 3.5%,
+   * then a twelfth of that — and never shown. They are the two limits an agent actually
+   * dies against, so they are asked for.
+   */
+  const [budget, setBudget] = useState(150);
+  const [population, setPopulation] = useState(6);
+  const [perAgent, setPerAgent] = useState(25);
+  const [epochCap, setEpochCap] = useState(6);
+  const overAllocated = population * perAgent > budget;
+
   /** Read the file into a data: URL. 4 MB keeps the request well under the API's limit. */
   function onPhoto(event: React.ChangeEvent<HTMLInputElement>) {
     setPhotoError(null);
@@ -70,6 +84,8 @@ export function SetupForm() {
         },
         budgetUsd,
         populationSize,
+        perAgentUsd: Number(form.get("perAgentUsd")),
+        epochCapUsd: Number(form.get("epochCapUsd")),
         seed: form.get("seed") ? Number(form.get("seed")) : undefined,
         context: form.get("context") ?? "",
         audience: form.get("audience") ?? "",
@@ -294,22 +310,23 @@ export function SetupForm() {
 
           <Row>
             <Field
-              label="Campaign budget"
-              hint="A hard ceiling. The contract will not let them past it."
+              label="How much are you putting in?"
+              hint="The whole campaign. No agent can spend past this — the contract reverts, it is not a setting we check."
             >
               <input
                 name="budgetUsd"
                 type="number"
                 min={10}
-                step={5000}
+                step={10}
                 required
                 className="tnum"
-                defaultValue={60000}
+                defaultValue={budget}
+                onChange={(e) => setBudget(Number(e.currentTarget.value))}
               />
             </Field>
             <Field
-              label="Agents to start with"
-              hint="Each one gets an equal share and its own wallet."
+              label="How many agents should try?"
+              hint="Each gets its own wallet and an equal cut to start. More agents search wider, but each one gets less to prove itself with."
             >
               <input
                 name="populationSize"
@@ -318,7 +335,41 @@ export function SetupForm() {
                 max={12}
                 required
                 className="tnum"
-                defaultValue={6}
+                defaultValue={population}
+                onChange={(e) => setPopulation(Number(e.currentTarget.value))}
+              />
+            </Field>
+          </Row>
+
+          <Row>
+            <Field
+              label="What can one agent spend in its whole life?"
+              hint="Its ceiling from birth to shutdown. Spending it all is how an agent dies."
+            >
+              <input
+                name="perAgentUsd"
+                type="number"
+                min={1}
+                step={1}
+                required
+                className="tnum"
+                value={perAgent}
+                onChange={(e) => setPerAgent(Number(e.currentTarget.value))}
+              />
+            </Field>
+            <Field
+              label="And how much in a single day?"
+              hint="Stops one agent burning its whole budget on a bad idea before the numbers come back."
+            >
+              <input
+                name="epochCapUsd"
+                type="number"
+                min={1}
+                step={1}
+                required
+                className="tnum"
+                value={epochCap}
+                onChange={(e) => setEpochCap(Number(e.currentTarget.value))}
               />
             </Field>
             <Field label="Seed" hint="Leave empty for a fresh market.">
@@ -330,6 +381,37 @@ export function SetupForm() {
               />
             </Field>
           </Row>
+
+          {/* What those four numbers actually mean, in a sentence, before committing. */}
+          <p
+            style={{
+              color: overAllocated ? "var(--dead)" : "var(--ink-soft)",
+              fontSize: 14,
+              marginTop: "1rem",
+              maxWidth: "64ch",
+            }}
+          >
+            {overAllocated ? (
+              <>
+                {population} agents at ${perAgent.toFixed(0)} each comes to $
+                {(population * perAgent).toFixed(0)}, which is more than the $
+                {budget.toFixed(0)} you are putting in. Lower the per-agent
+                ceiling or raise the budget.
+              </>
+            ) : (
+              <>
+                {population} agents start with ${perAgent.toFixed(0)} each to
+                spend over their lifetime, at most ${epochCap.toFixed(0)} a day
+                — so this generation can spend $
+                {(population * epochCap).toFixed(0)} a day between them, and an
+                agent takes about{" "}
+                {Math.max(1, Math.round(perAgent / epochCap))} days to exhaust
+                itself. The other $
+                {(budget - population * perAgent).toFixed(0)} is held back to
+                fund the children of whichever strategies work.
+              </>
+            )}
+          </p>
         </fieldset>
 
         {error && (
@@ -344,7 +426,7 @@ export function SetupForm() {
         <button
           type="submit"
           className="press press-solid"
-          disabled={submitting}
+          disabled={submitting || overAllocated}
           style={{ marginTop: "1.75rem" }}
         >
           {submitting
