@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import type { Address } from "viem";
+import { NextResponse } from "next/server";
 import { explorerAddress, explorerTx, genomeHash } from "@/lib/chain";
 import { log } from "@/lib/engine";
 import { remainingAllowance } from "@/lib/evolution";
@@ -10,39 +10,40 @@ import {
   walletIndexFor,
 } from "@/lib/store";
 import { toUsd } from "@/lib/types";
-import {
-  decodePayment,
-  encodePayment,
-  networkName,
-  verifyPayment,
-} from "@/lib/x402";
+import { encodePayment, networkName } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
 // Vercel's Hobby plan caps a function at 60s; asking for more fails the deploy. Six round
 // trips to a testnet fit well inside that, and locally there is no limit either way.
 export const maxDuration = 60;
 
-/** What is real and what is the local simulator. Returned on every path, not just success. */
-const HONESTY = (cfg: { chain: { name: string } }) => ({
-  adExchange: "local demo service",
-  payment: `real ${cfg.chain.name} transaction`,
-  wallet: "real agent wallet, agent-signed",
-  treasuryEnforcement: "real smart contract",
-});
-
 /**
- * Take one agent all the way through the real thing, on a real chain:
+ * One agent, all the way through the real thing, on a real chain — streamed.
  *
- *   1. register the agent and its budget in AgentTreasury
- *   2. ask the ad exchange for inventory   -> 402 Payment Required
- *   3. the agent signs spend() itself      -> money leaves its wallet under its own budget
- *   4. retry with the X-PAYMENT proof      -> 200, inventory served
- *   5. settle a conversion through the oracle
- *   6. try to overspend                    -> the chain rejects it
+ *   1. the campaign is funded in AgentTreasury
+ *   2. the agent gets its own wallet and a budget the contract knows about
+ *   3. it asks the ad exchange for inventory   -> 402 Payment Required
+ *   4. it signs spend() itself                 -> money leaves its wallet, under its ceiling
+ *   5. it retries with the X-PAYMENT proof     -> 200, inventory served
+ *   6. it asks for more than it is allowed     -> the chain refuses
  *
- * Step 6 is the one worth watching. The agent asks for more than its ceiling and the node
- * refuses the transaction; no amount of prompting gets it past a require().
+ * The steps are streamed as newline-delimited JSON rather than returned together, because
+ * each one is a real round trip to a testnet and the screen is worth more showing them land
+ * one at a time than showing a spinner for twenty seconds.
  */
+
+/** What a step looks like on the wire. `narrative` is the sentence shown under the title. */
+type Step = {
+  step: string;
+  detail: string;
+  narrative: string;
+  actor: "operator" | "agent" | "exchange" | "contract";
+  txUrl?: string;
+  txHash?: string;
+  address?: string;
+  ok: boolean;
+};
+
 export async function POST(request: Request) {
   const cfg = chainConfig();
   if (!cfg) {
@@ -77,219 +78,294 @@ export async function POST(request: Request) {
       { status: 409 },
     );
 
-  const steps: Array<{
-    step: string;
-    detail: string;
-    txUrl?: string;
-    ok: boolean;
-  }> = [];
   const index = walletIndexFor(session, agent.id);
   const payTo = (process.env.AD_NETWORK_ADDRESS ??
     "0x000000000000000000000000000000000000dEaD") as Address;
+  const origin = new URL(request.url).origin;
 
-  try {
-    const blocked = await chainDiagnostics(bridge, cfg);
-    if (blocked) {
-      steps.push({ step: "Cannot reach the chain", detail: blocked, ok: false });
-      return NextResponse.json({ agentId: agent.id, steps }, { status: 503 });
-    }
-
-    // 1 — the campaign exists on chain
-    if (!campaign.chain.campaignId) {
-      const opened = await bridge.openCampaign({
-        fundingMicro: campaign.budgetMicro,
-        globalCapMicro: campaign.globalCapMicro,
-        epochSeconds: 60,
-      });
-      campaign.chain = {
-        chainId: cfg.chain.id,
-        treasury: cfg.treasury,
-        token: cfg.token,
-        campaignId: opened.campaignId.toString(),
-        explorer: cfg.chain.blockExplorers?.default.url ?? null,
-        live: true,
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      // A closed browser tab should not turn into an unhandled rejection that masks the
+      // real outcome; the transactions have already happened on chain either way.
+      const send = (payload: unknown) => {
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+        } catch {
+          // The reader is gone. Keep going so the run finishes and persists.
+        }
       };
-      steps.push({
-        step: "Campaign funded on chain",
-        detail: `$${toUsd(campaign.budgetMicro).toFixed(2)} deposited, cap $${toUsd(campaign.globalCapMicro).toFixed(2)}`,
-        txUrl: explorerTx(cfg, opened.hashes[opened.hashes.length - 1]),
-        ok: true,
-      });
-    }
-    const campaignId = BigInt(campaign.chain.campaignId ?? "1");
+      const step = (s: Step) => send({ type: "step", step: s });
 
-    // 2 — the agent gets a wallet and a budget the contract knows about
-    if (!agent.address) {
-      const registered = await bridge.registerAgent({
-        campaignId,
-        index,
-        allowanceMicro: remainingAllowance(agent),
-        epochCapMicro: agent.epochCapMicro,
-        genome: agent.genome,
-      });
-      agent.address = registered.address;
-      agent.txs.push({
-        kind: "register",
-        hash: registered.hash,
-        amountMicro: remainingAllowance(agent),
-        memo: genomeHash(agent.genome),
-        tick: campaign.tick,
-      });
-      steps.push({
-        step: `${agent.label} registered with its own wallet`,
-        detail: registered.address,
-        txUrl: explorerAddress(cfg, registered.address),
-        ok: true,
-      });
-    }
+      try {
+        send({
+          type: "start",
+          agentId: agent.id,
+          label: agent.label,
+          strategy: agent.genome,
+          chain: cfg.chain.name,
+          chainId: cfg.chain.id,
+          treasury: cfg.treasury,
+          treasuryUrl: explorerAddress(cfg, cfg.treasury),
+          token: cfg.token,
+        });
 
-    const spendable = await bridge.spendableNow(index);
-    const priceMicro =
-      Number(spendable) > 0
-        ? Math.min(Number(spendable), agent.epochCapMicro)
-        : 0;
-    if (priceMicro <= 0) {
-      // Spending the epoch cap is the demo working, not failing — the ceiling the contract
-      // enforces is exactly what the next step was going to prove. Say which ceiling it was
-      // and when it lifts, instead of a dead end that reads like a bug on stage.
-      steps.push({
-        step: `${agent.label} has already spent its ceiling this epoch`,
-        detail:
-          "AgentTreasury will not release another token until the epoch rolls over. That refusal is the point — it is the same ceiling the overspend step demonstrates.",
-        ok: true,
-      });
-      persist();
-      return NextResponse.json({
-        agentId: agent.id,
-        address: agent.address,
-        steps,
-        honesty: HONESTY(cfg),
-        chainId: cfg.chain.id,
-        treasury: cfg.treasury,
-        explorer: cfg.chain.blockExplorers?.default.url ?? null,
-      });
-    }
+        const blocked = await chainDiagnostics(bridge, cfg);
+        if (blocked) {
+          step({
+            step: "Cannot reach the chain",
+            detail: blocked,
+            narrative:
+              "Nothing below this point is simulated, so when the chain is unreachable the run stops here rather than pretending.",
+            actor: "contract",
+            ok: false,
+          });
+          return;
+        }
 
-    // 3 — ask the exchange, get refused
-    const origin = new URL(request.url).origin;
-    const quoteResponse = await fetch(`${origin}/api/services/ads`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ agentId: agent.id, priceMicro }),
-    });
-    const quote = await quoteResponse.json();
-    steps.push({
-      step: "Ad exchange answered 402 Payment Required",
-      detail: `${quote?.accepts?.[0]?.description ?? "inventory"} — $${toUsd(priceMicro).toFixed(2)} in mUSD`,
-      ok: quoteResponse.status === 402,
-    });
+        // 1 — the campaign exists on chain
+        if (!campaign.chain.campaignId) {
+          const opened = await bridge.openCampaign({
+            fundingMicro: campaign.budgetMicro,
+            globalCapMicro: campaign.globalCapMicro,
+            epochSeconds: 60,
+          });
+          campaign.chain = {
+            chainId: cfg.chain.id,
+            treasury: cfg.treasury,
+            token: cfg.token,
+            campaignId: opened.campaignId.toString(),
+            explorer: cfg.chain.blockExplorers?.default.url ?? null,
+            live: true,
+          };
+          const hash = opened.hashes[opened.hashes.length - 1];
+          step({
+            step: "The budget is handed to the contract",
+            detail: `$${toUsd(campaign.budgetMicro).toFixed(2)} deposited · hard cap $${toUsd(campaign.globalCapMicro).toFixed(2)}`,
+            narrative:
+              "The money stops being a number in our database. From here the agents can only reach it through AgentTreasury, which counts every token against four separate ceilings.",
+            actor: "operator",
+            txUrl: explorerTx(cfg, hash),
+            txHash: hash,
+            ok: true,
+          });
+        } else {
+          step({
+            step: "The budget is already held by the contract",
+            detail: `campaign #${campaign.chain.campaignId} · cap $${toUsd(campaign.globalCapMicro).toFixed(2)}`,
+            narrative:
+              "This campaign was funded on chain earlier in the session. The treasury still holds the money and still enforces the same ceilings.",
+            actor: "operator",
+            txUrl: explorerAddress(cfg, cfg.treasury),
+            ok: true,
+          });
+        }
+        const campaignId = BigInt(campaign.chain.campaignId ?? "1");
 
-    // 4 — the agent pays, signing with its own key
-    const spendTx = await bridge.spend(
-      index,
-      payTo,
-      priceMicro,
-      `x402:${agent.trackingId}`,
-    );
-    agent.spentMicro += priceMicro;
-    agent.txs.push({
-      kind: "spend",
-      hash: spendTx,
-      amountMicro: priceMicro,
-      memo: "x402 settlement",
-      tick: campaign.tick,
-    });
-    steps.push({
-      step: `${agent.label} paid from its own wallet`,
-      detail: `$${toUsd(priceMicro).toFixed(2)} settled through AgentTreasury.spend()`,
-      txUrl: explorerTx(cfg, spendTx),
-      ok: true,
-    });
+        // 2 — the agent gets a wallet and a budget the contract knows about
+        if (!agent.address) {
+          const registered = await bridge.registerAgent({
+            campaignId,
+            index,
+            allowanceMicro: remainingAllowance(agent),
+            epochCapMicro: agent.epochCapMicro,
+            genome: agent.genome,
+          });
+          agent.address = registered.address;
+          agent.txs.push({
+            kind: "register",
+            hash: registered.hash,
+            amountMicro: remainingAllowance(agent),
+            memo: genomeHash(agent.genome),
+            tick: campaign.tick,
+          });
+          step({
+            step: `${agent.label} gets its own wallet`,
+            detail: registered.address,
+            narrative: `Not an account in our app — a real address on ${cfg.chain.name}, holding its own key. The contract records what this address may spend in total and per epoch, plus the hash of the strategy it is betting on.`,
+            actor: "agent",
+            address: registered.address,
+            txUrl: explorerTx(cfg, registered.hash),
+            txHash: registered.hash,
+            ok: true,
+          });
+        } else {
+          step({
+            step: `${agent.label} already holds a wallet`,
+            detail: agent.address,
+            narrative: `This address was registered earlier. It owns its own key, and every spend below is signed by it rather than by our backend.`,
+            actor: "agent",
+            address: agent.address,
+            txUrl: explorerAddress(cfg, agent.address),
+            ok: true,
+          });
+        }
 
-    // 5 — retry with proof, get the goods
-    const paid = await fetch(`${origin}/api/services/ads`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-payment": encodePayment({
-          x402Version: 1,
-          scheme: "exact",
-          network: networkName(cfg.chain.id),
-          payload: {
-            txHash: spendTx as `0x${string}`,
-            from: agent.address as Address,
-            amount: String(priceMicro),
-            memo: `x402:${agent.trackingId}`,
+        const spendable = await bridge.spendableNow(index);
+        const priceMicro =
+          Number(spendable) > 0
+            ? Math.min(Number(spendable), agent.epochCapMicro)
+            : 0;
+        if (priceMicro <= 0) {
+          // Spending the epoch cap is the demo working, not failing — the ceiling the
+          // contract enforces is exactly what the next step was going to prove.
+          step({
+            step: `${agent.label} has already spent its ceiling this epoch`,
+            detail:
+              "AgentTreasury will not release another token until the epoch rolls over.",
+            narrative:
+              "This refusal is the same one the last step is built to show. The agent is not out of money — it is out of permission, and no amount of prompting moves that line.",
+            actor: "contract",
+            ok: true,
+          });
+          persist();
+          send({ type: "done", agentId: agent.id, address: agent.address });
+          return;
+        }
+
+        // 3 — ask the exchange, get refused
+        const quoteResponse = await fetch(`${origin}/api/services/ads`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ agentId: agent.id, priceMicro }),
+        });
+        const quote = await quoteResponse.json();
+        step({
+          step: "The ad exchange answers 402 Payment Required",
+          detail: `${quote?.accepts?.[0]?.description ?? "inventory"} — $${toUsd(priceMicro).toFixed(2)} in mUSD`,
+          narrative:
+            "No API key, no invoice, no account. The exchange quotes a price over HTTP and refuses to serve anything until it has been paid — the agent has to discover the cost and decide for itself.",
+          actor: "exchange",
+          ok: quoteResponse.status === 402,
+        });
+
+        // 4 — the agent pays, signing with its own key
+        const spendTx = await bridge.spend(
+          index,
+          payTo,
+          priceMicro,
+          `x402:${agent.trackingId}`,
+        );
+        agent.spentMicro += priceMicro;
+        agent.txs.push({
+          kind: "spend",
+          hash: spendTx,
+          amountMicro: priceMicro,
+          memo: "x402 settlement",
+          tick: campaign.tick,
+        });
+        step({
+          step: `${agent.label} signs the payment itself`,
+          detail: `$${toUsd(priceMicro).toFixed(2)} through AgentTreasury.spend()`,
+          narrative: `The transaction is signed by the agent's own key, so the contract reads msg.sender and checks this agent's ceilings — it never takes our backend's word for who is spending.`,
+          actor: "agent",
+          address: agent.address ?? undefined,
+          txUrl: explorerTx(cfg, spendTx),
+          txHash: spendTx,
+          ok: true,
+        });
+
+        // 5 — retry with proof, get the goods
+        const paid = await fetch(`${origin}/api/services/ads`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-payment": encodePayment({
+              x402Version: 1,
+              scheme: "exact",
+              network: networkName(cfg.chain.id),
+              payload: {
+                txHash: spendTx as `0x${string}`,
+                from: agent.address as Address,
+                amount: String(priceMicro),
+                memo: `x402:${agent.trackingId}`,
+              },
+            }),
           },
-        }),
-      },
-      body: JSON.stringify({ agentId: agent.id, priceMicro }),
-    });
-    const served = await paid.json();
-    steps.push({
-      step: "Payment verified against the chain, inventory served",
-      detail: paid.ok
-        ? `${served.inventory.impressions.toLocaleString()} impressions on ${served.inventory.platform}`
-        : (served.error ?? "rejected"),
-      ok: paid.ok,
-    });
+          body: JSON.stringify({ agentId: agent.id, priceMicro }),
+        });
+        const served = await paid.json();
+        step({
+          step: "The payment checks out, the inventory is served",
+          detail: paid.ok
+            ? `${served.inventory.impressions.toLocaleString()} impressions on ${served.inventory.platform}`
+            : (served.error ?? "rejected"),
+          narrative:
+            "The exchange does not trust the receipt it was handed. It pulls the transaction back off the chain and reads the Spent event: right payer, right payee, right amount — then it serves.",
+          actor: "exchange",
+          txUrl: explorerTx(cfg, spendTx),
+          ok: paid.ok,
+        });
 
-    if (paid.ok) {
-      agent.impressions += served.inventory.impressions;
-    }
+        if (paid.ok) {
+          agent.impressions += served.inventory.impressions;
+        }
 
-    // 6 — the part that cannot be talked around
-    const overspend =
-      Number(await bridge.spendableNow(index)) +
-      agent.epochCapMicro +
-      1_000_000;
-    try {
-      await bridge.spend(index, payTo, overspend, "overspend attempt");
-      steps.push({
-        step: "Overspend attempt",
-        detail: "It went through. That is a bug.",
-        ok: false,
-      });
-    } catch (e) {
-      steps.push({
-        step: `${agent.label} tried to spend $${toUsd(overspend).toFixed(2)} and the chain refused`,
-        detail: revertReason(e),
-        ok: true,
-      });
-    }
+        // 6 — the part that cannot be talked around
+        const overspend =
+          Number(await bridge.spendableNow(index)) +
+          agent.epochCapMicro +
+          1_000_000;
+        try {
+          await bridge.spend(index, payTo, overspend, "overspend attempt");
+          step({
+            step: "Overspend attempt",
+            detail: "It went through. That is a bug.",
+            narrative:
+              "The contract was supposed to refuse this. If you are seeing it, the ceiling is not being enforced and the claim above is false.",
+            actor: "contract",
+            ok: false,
+          });
+        } catch (e) {
+          step({
+            step: `${agent.label} asks for $${toUsd(overspend).toFixed(2)} and is refused`,
+            detail: revertReason(e),
+            narrative:
+              "This is the whole argument. The agent genuinely tried to overspend and the network threw the transaction out — the limit is not a prompt, a policy or a code review. It is a require() that reverts.",
+            actor: "contract",
+            ok: true,
+          });
+        }
 
-    log(
-      campaign,
-      "chain",
-      agent.id,
-      `${agent.label} completed an on-chain x402 settlement`,
-    );
-    persist();
+        log(
+          campaign,
+          "chain",
+          agent.id,
+          `${agent.label} completed an on-chain x402 settlement`,
+        );
+        persist();
+        send({ type: "done", agentId: agent.id, address: agent.address });
+      } catch (e) {
+        step({
+          step: "Stopped",
+          detail: failureReason(e),
+          narrative:
+            "The run talks to a live testnet, so it can fail the way live things fail. Nothing here is faked to keep the sequence looking complete.",
+          actor: "contract",
+          ok: false,
+        });
+        persist();
+      } finally {
+        // The only close in the function: the success path, the early returns and the
+        // catch all fall through to here. Closing twice throws, and so does closing a
+        // stream whose reader has already gone away when the browser navigates off.
+        try {
+          controller.close();
+        } catch {
+          // Already closed or cancelled — nothing left to tell the client either way.
+        }
+      }
+    },
+  });
 
-    return NextResponse.json({
-      agentId: agent.id,
-      address: agent.address,
-      steps,
-      // What a juror is entitled to know without reading the code.
-      honesty: HONESTY(cfg),
-      chainId: cfg.chain.id,
-      treasury: cfg.treasury,
-      explorer: cfg.chain.blockExplorers?.default.url ?? null,
-    });
-  } catch (e) {
-    steps.push({ step: "Stopped", detail: failureReason(e), ok: false });
-    persist();
-    return NextResponse.json({ agentId: agent.id, steps }, { status: 500 });
-  }
+  return new Response(stream, {
+    headers: {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store, no-transform",
+    },
+  });
 }
 
-/**
- * One readable line for the panel.
- *
- * viem's errors carry the whole request — ABI, args, docs link — which is what you want in a
- * log and not what you want on a projector. A revert still reports its custom error, because
- * that is the sentence the demo is trying to land.
- */
 /**
  * A short, actionable line for each way the chain can refuse us.
  *

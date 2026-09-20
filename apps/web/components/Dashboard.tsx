@@ -2,12 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ChainFlow } from "./ChainFlow";
 import { LineageStrip } from "./LineageStrip";
 import { PopulationTable } from "./PopulationTable";
-import { CreativeGallery } from "./CreativeGallery";
-import { PitchStage } from "./PitchStage";
-import { ProofPanel } from "./ProofPanel";
-import { DEATH_REASONS, type CampaignView, money, percent } from "@/lib/view";
+import { type CampaignView, money, percent } from "@/lib/view";
 
 type ChainStatus =
   | { configured: false }
@@ -26,7 +24,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   /**
-   * Autoplay is what turns the dashboard into something to watch rather than click.
+   * Autoplay is what turns the population into something to watch rather than click.
    * While the speaker is talking, days pass, agents die and children are born on screen.
    */
   const [running, setRunning] = useState(false);
@@ -106,64 +104,40 @@ export function Dashboard() {
     );
   }
 
-  const spentShare =
-    campaign.globalCapUsd === 0 ? 0 : campaign.spentUsd / campaign.globalCapUsd;
   const champion = campaign.agents.find((a) => a.isChampion) ?? null;
 
   return (
-    <main style={{ maxWidth: 1180, margin: "0 auto", padding: "0 1rem 5rem" }}>
-      <header style={{ paddingTop: "2.5rem", paddingBottom: "1.75rem" }}>
+    <main style={{ maxWidth: 1020, margin: "0 auto", padding: "0 1rem 5rem" }}>
+      <header style={{ paddingTop: "2.5rem", paddingBottom: "1.5rem" }}>
         <p style={{ color: "var(--ink-faint)", fontSize: 13, margin: 0 }}>
-          Day {campaign.tick} of selling {campaign.productName} at $
-          {campaign.priceUsd.toFixed(0)}
+          Selling {campaign.productName} at ${campaign.priceUsd.toFixed(0)} ·
+          day {campaign.tick} · generation {campaign.generation}
         </p>
         <h1
           style={{
-            fontSize: "clamp(1.9rem, 5vw, 3rem)",
+            fontSize: "clamp(1.8rem, 4.5vw, 2.6rem)",
             marginTop: "0.4rem",
-            maxWidth: "18ch",
+            maxWidth: "20ch",
           }}
         >
-          Generation {campaign.generation}
+          {campaign.alive} agents are spending real money
         </h1>
-        <p
-          style={{
-            color: "var(--ink-soft)",
-            marginTop: "0.6rem",
-            maxWidth: "58ch",
-          }}
-        >
-          {campaign.alive} agents are still trading and {campaign.dead} have
-          been shut down, out of {campaign.total} ever created. None of them was
-          told which strategy works.
-        </p>
       </header>
 
-      <section
-        className="band"
-        style={{ paddingTop: "1.5rem", paddingBottom: "2rem" }}
-      >
-        <LineageStrip
-          agents={campaign.agents}
-          generation={campaign.generation}
-          selectedId={hovered}
-          onSelect={setHovered}
-        />
-      </section>
-
+      {/* The numbers that decide who gets to spend, and nothing else. */}
       <section
         className="band"
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
           gap: "1.5rem",
-          padding: "1.5rem 0",
+          padding: "1.25rem 0",
         }}
       >
         <Figure
           label="Spent"
           value={money(campaign.spentUsd)}
-          note={`of ${money(campaign.globalCapUsd)} allowed`}
+          note={`ceiling ${money(campaign.globalCapUsd)}`}
         />
         <Figure
           label="Earned"
@@ -183,20 +157,8 @@ export function Dashboard() {
         <Figure
           label="Best earner"
           value={champion ? champion.label : "—"}
-          note={
-            champion
-              ? `${money(champion.profitUsd, true)} on ${champion.genome.platform}`
-              : "nobody is up yet"
-          }
+          note={champion ? `on ${champion.genome.platform}` : "nobody is up yet"}
           tone="sulfur"
-        />
-      </section>
-
-      <section className="band" style={{ padding: "1.25rem 0" }}>
-        <CapBar
-          share={spentShare}
-          spent={campaign.spentUsd}
-          cap={campaign.globalCapUsd}
         />
       </section>
 
@@ -214,167 +176,154 @@ export function Dashboard() {
         </p>
       )}
 
-      <section
-        className="band"
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "0.6rem",
-          alignItems: "center",
-          padding: "1.25rem 0",
-        }}
-      >
-        {/* The demo button: days pass while the speaker talks, so the audience watches
-            agents be born, compete and die instead of watching someone click. */}
-        <button
-          type="button"
-          className={running ? "press press-solid" : "press press-solid"}
-          disabled={busy !== null || campaign.paused}
-          onClick={() => setRunning((r) => !r)}
-          style={
-            running
-              ? { background: "var(--loss, #b4462f)", borderColor: "var(--loss, #b4462f)" }
-              : undefined
-          }
-        >
-          {running ? "■ Stop the clock" : "▶ Run it live"}
-        </button>
-        <button
-          type="button"
-          className="press"
-          disabled={busy !== null || campaign.paused || running}
-          onClick={() =>
-            act("tick", () => fetch("/api/tick?ticks=1", { method: "POST" }))
-          }
-        >
-          {busy === "tick" ? "Trading…" : "Run one day"}
-        </button>
-        <button
-          type="button"
-          className="press"
-          disabled={busy !== null || campaign.paused || running}
-          onClick={() =>
-            act("week", () => fetch("/api/tick?ticks=6", { method: "POST" }))
-          }
-        >
-          {busy === "week" ? "Trading…" : "Run six days"}
-        </button>
-        <button
-          type="button"
-          className="press"
-          disabled={busy !== null}
-          onClick={() =>
-            act("pause", () =>
-              fetch("/api/control", {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({
-                  action: campaign.paused ? "resume" : "pause",
-                }),
-              }),
-            )
-          }
-        >
-          {campaign.paused ? "Resume the campaign" : "Stop everything"}
-        </button>
-        {/* Back to the setup screen with a clean slate — what the speaker presses when the
-            audience names a product. endCampaign() drops the whole session, so the next
-            campaign shares no agents, publications, metrics or events with this one. */}
-        <button
-          type="button"
-          className="press"
-          disabled={busy !== null}
-          onClick={() => {
-            setRunning(false);
-            act("new", async () => {
-              const res = await fetch("/api/campaign", { method: "DELETE" });
-              router.push("/");
-              router.refresh();
-              return res;
-            });
-          }}
-        >
-          + New campaign
-        </button>
+      {/* The main event. */}
+      <section className="band" style={{ paddingTop: "1.75rem" }}>
+        <ChainFlow chain={chain} campaign={campaign} onDone={refresh} />
+      </section>
 
-        <label
+      {/* Everything below explains where that agent came from. */}
+      <section className="band" style={{ marginTop: "3rem", paddingTop: "1.75rem" }}>
+        <h2 style={{ fontSize: "1.4rem" }}>Where that agent came from</h2>
+        <p
           style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "0.5rem",
-            marginLeft: "auto",
+            color: "var(--ink-soft)",
+            marginTop: "0.5rem",
+            maxWidth: "62ch",
           }}
         >
-          <span
-            style={{
-              color: "var(--ink-soft)",
-              fontSize: 13,
-              whiteSpace: "nowrap",
-            }}
+          Nobody chose its strategy. {campaign.total} agents have been created,{" "}
+          {campaign.dead} were shut down for spending more than they earned, and
+          the survivors bred into the gap they left.
+        </p>
+
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.6rem",
+            alignItems: "center",
+            padding: "1.25rem 0",
+          }}
+        >
+          <button
+            type="button"
+            className="press press-solid"
+            disabled={busy !== null || campaign.paused}
+            onClick={() => setRunning((r) => !r)}
+            style={
+              running
+                ? { background: "var(--dead)", borderColor: "var(--dead)" }
+                : undefined
+            }
           >
-            Spending cap
-          </span>
-          <input
-            type="number"
-            defaultValue={campaign.globalCapUsd}
-            min={0}
-            step={5}
-            style={{ width: 110 }}
-            className="tnum"
-            onBlur={(e) => {
-              const capUsd = Number(e.currentTarget.value);
-              if (capUsd === campaign.globalCapUsd) return;
-              act("cap", () =>
+            {running ? "■ Stop the clock" : "▶ Run the days"}
+          </button>
+          <button
+            type="button"
+            className="press"
+            disabled={busy !== null || campaign.paused || running}
+            onClick={() =>
+              act("tick", () => fetch("/api/tick?ticks=1", { method: "POST" }))
+            }
+          >
+            {busy === "tick" ? "Trading…" : "One day"}
+          </button>
+          <button
+            type="button"
+            className="press"
+            disabled={busy !== null}
+            onClick={() =>
+              act("pause", () =>
                 fetch("/api/control", {
                   method: "POST",
                   headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ action: "setGlobalCap", capUsd }),
+                  body: JSON.stringify({
+                    action: campaign.paused ? "resume" : "pause",
+                  }),
                 }),
-              );
+              )
+            }
+          >
+            {campaign.paused ? "Resume" : "Freeze everything"}
+          </button>
+          {/* Back to setup with a clean slate. endCampaign() drops the whole session, so
+              the next campaign shares no agents, metrics or events with this one. */}
+          <button
+            type="button"
+            className="press"
+            disabled={busy !== null}
+            style={{ marginLeft: "auto" }}
+            onClick={() => {
+              setRunning(false);
+              act("new", async () => {
+                const res = await fetch("/api/campaign", { method: "DELETE" });
+                router.push("/");
+                router.refresh();
+                return res;
+              });
             }}
-          />
-        </label>
+          >
+            + New campaign
+          </button>
+        </div>
+
+        {campaign.paused && (
+          <p style={{ color: "var(--dead)", margin: "0 0 1rem" }}>
+            Every agent is frozen. On chain this is the same owner-only pause
+            that makes <code>spend()</code> revert.
+          </p>
+        )}
+
+        <LineageStrip
+          agents={campaign.agents}
+          generation={campaign.generation}
+          selectedId={hovered}
+          onSelect={setHovered}
+        />
       </section>
 
-      {campaign.paused && (
-        <p style={{ color: "var(--dead)", margin: "0 0 1rem" }}>
-          Every agent is frozen. On chain this is the same owner-only pause that
-          makes <code>spend()</code> revert.
-        </p>
-      )}
+      <details style={{ marginTop: "2rem" }}>
+        <summary
+          style={{
+            cursor: "pointer",
+            color: "var(--ink-soft)",
+            padding: "0.75rem 0",
+            borderTop: "1px solid var(--rule)",
+          }}
+        >
+          Every agent, line by line ({campaign.alive} trading, {campaign.dead}{" "}
+          shut down)
+        </summary>
+        <PopulationTable
+          agents={campaign.agents}
+          hovered={hovered}
+          onHover={setHovered}
+          busy={busy !== null}
+          explorer={chain.configured ? chain.explorer : null}
+          onKill={(agentId) =>
+            act("kill", () =>
+              fetch("/api/control", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ action: "kill", agentId }),
+              }),
+            )
+          }
+        />
+      </details>
 
-      <PopulationTable
-        agents={campaign.agents}
-        hovered={hovered}
-        onHover={setHovered}
-        busy={busy !== null}
-        explorer={chain.configured ? chain.explorer : null}
-        onKill={(agentId) =>
-          act("kill", () =>
-            fetch("/api/control", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ action: "kill", agentId }),
-            }),
-          )
-        }
-      />
-
-      <PitchStage
-        campaign={campaign}
-        context={campaign.productContext}
-        image={campaign.productImage}
-      />
-
-      <CreativeGallery campaign={campaign} productImage={campaign.productImage} />
-
-      <ProofPanel chain={chain} campaign={campaign} onDone={refresh} />
-
-      <section className="band" style={{ paddingTop: "1.5rem" }}>
-        <h2 style={{ fontSize: "1.25rem", marginBottom: "0.75rem" }}>
-          What happened
-        </h2>
-        <ol style={{ listStyle: "none", margin: 0, padding: 0 }}>
+      <details style={{ marginTop: "0.5rem" }}>
+        <summary
+          style={{
+            cursor: "pointer",
+            color: "var(--ink-soft)",
+            padding: "0.75rem 0",
+            borderTop: "1px solid var(--rule)",
+          }}
+        >
+          What happened, day by day
+        </summary>
+        <ol style={{ listStyle: "none", margin: "0.5rem 0 0", padding: 0 }}>
           {campaign.events.map((event, i) => (
             <li
               key={`${event.at}-${i}`}
@@ -409,20 +358,7 @@ export function Dashboard() {
             </li>
           ))}
         </ol>
-      </section>
-
-      <footer
-        className="band"
-        style={{
-          marginTop: "2rem",
-          paddingTop: "1.25rem",
-          color: "var(--ink-faint)",
-          fontSize: 13,
-        }}
-      >
-        Agents are shut down when they {DEATH_REASONS.unprofitable}. Their
-        unspent budget returns to the campaign, and the survivors breed into it.
-      </footer>
+      </details>
     </main>
   );
 }
@@ -445,7 +381,7 @@ function Figure({
       <div
         className="tnum"
         style={{
-          fontSize: "1.6rem",
+          fontSize: "1.5rem",
           color,
           marginTop: "0.2rem",
           lineHeight: 1.1,
@@ -457,59 +393,6 @@ function Figure({
         style={{ color: "var(--ink-soft)", fontSize: 13, marginTop: "0.15rem" }}
       >
         {note}
-      </div>
-    </div>
-  );
-}
-
-/** The one number the person funding this actually cares about. */
-function CapBar({
-  share,
-  spent,
-  cap,
-}: {
-  share: number;
-  spent: number;
-  cap: number;
-}) {
-  const pct = Math.min(1, Math.max(0, share));
-  return (
-    <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          fontSize: 13,
-          marginBottom: "0.4rem",
-        }}
-      >
-        <span style={{ color: "var(--ink-soft)" }}>
-          The population cannot spend past {money(cap)} — the contract reverts,
-          not the dashboard.
-        </span>
-        <span className="tnum" style={{ color: "var(--ink-faint)" }}>
-          {money(spent)} used
-        </span>
-      </div>
-      <div
-        style={{
-          height: 8,
-          background: "var(--paper-sunk)",
-          border: "1px solid var(--rule)",
-        }}
-        role="meter"
-        aria-valuenow={Math.round(pct * 100)}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-label="Share of the campaign cap already spent"
-      >
-        <div
-          style={{
-            width: `${pct * 100}%`,
-            height: "100%",
-            background: "var(--ledger)",
-          }}
-        />
       </div>
     </div>
   );
