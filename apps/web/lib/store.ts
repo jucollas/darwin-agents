@@ -75,21 +75,33 @@ const WALLET_CURSOR = resolve(DATA_DIR, "wallet-cursor.json");
 let blocksClaimedThisProcess = 0;
 
 function claimWalletBlock(): number {
-  let next = 0;
+  let next: number | null = null;
   try {
-    next = JSON.parse(readFileSync(WALLET_CURSOR, "utf8"))?.nextBlock ?? 0;
+    next = JSON.parse(readFileSync(WALLET_CURSOR, "utf8"))?.nextBlock ?? null;
   } catch {
-    // No cursor yet — start at the first block.
+    // No cursor here.
   }
-  if (!Number.isInteger(next) || next < 0) next = 0;
+  if (!Number.isInteger(next) || (next as number) < 0) next = null;
+
+  // No cursor means a fresh disk, not a fresh chain.
+  //
+  // On Vercel /tmp is writable but starts empty on every new instance, so this is the
+  // common case and the one that used to bite: starting at block 0 handed each instance
+  // the same low indices, whose agents are already registered from earlier runs, and
+  // registerAgent reverted with AgentExists(). The cursor then counted up from 0 inside
+  // that instance while the next instance started from 0 all over again.
+  //
+  // Seeding at random instead makes a cold instance pick an unused block, and the cursor
+  // keeps stepping forward from there for as long as that instance lives.
+  if (next === null) next = randomInt(0, BLOCK_CEILING);
 
   try {
     mkdirSync(dirname(WALLET_CURSOR), { recursive: true });
     writeFileSync(WALLET_CURSOR, JSON.stringify({ nextBlock: next + 1 }), "utf8");
-    return next * WALLET_BLOCK;
+    return (next % BLOCK_CEILING) * WALLET_BLOCK;
   } catch {
-    // Read-only filesystem — the usual case on Vercel, where /tmp is wiped between
-    // instances so the cursor is rarely there to read.
+    // Read-only filesystem: the cursor cannot be advanced, so the block has to come from
+    // somewhere that does not need to be written down.
     //
     // A start-time offset is not enough here. Seconds since the epoch modulo any window
     // wraps, and two campaigns that land on the same value derive the same addresses; the

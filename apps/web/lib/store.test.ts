@@ -13,7 +13,8 @@ import { SOLO_USER } from "./auth";
  */
 
 /** Mirrors store.ts: how many blocks fit under BIP-32's non-hardened limit. */
-const BLOCK_CEILING = Math.floor(2 ** 31 / 256);
+const WALLET_BLOCK = 256;
+const BLOCK_CEILING = Math.floor(2 ** 31 / WALLET_BLOCK);
 
 const PRODUCT = {
   name: "Aurora Sleep Mask",
@@ -108,6 +109,17 @@ describe("wallet derivation across campaigns", () => {
     } finally {
       chmodSync(dir, 0o755);
     }
+  }, 20_000);
+
+  it("does not start at block zero when the cursor is simply absent", async () => {
+    // The bug that actually bit on Vercel: /tmp IS writable there, so the read-only
+    // fallback never ran. A missing cursor was read as block 0, and since every new
+    // instance boots with an empty /tmp, they all derived the same low indices — whose
+    // agents were already registered from earlier runs, so registerAgent reverted with
+    // AgentExists(). Writability was never the question; an absent cursor was.
+    rmSync(join(dir, "data", "wallet-cursor.json"), { force: true });
+    const indices = await walletIndicesFor(123);
+    expect(Math.min(...indices)).toBeGreaterThan(WALLET_BLOCK);
   }, 20_000);
 
   it("does not depend on the clock to separate two cold instances", () => {
